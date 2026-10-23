@@ -1,8 +1,8 @@
 import { Canvas, useFrame } from "@react-three/fiber";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { JSX, RefObject } from "react";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
+import type { JSX, ReactNode, RefObject } from "react";
 import type { ShaderMaterial } from "three";
-import { Vector2 } from "three";
+import { Vector2, WebGLRenderer } from "three";
 
 export type ShaderAtmosphereVariant = "controller" | "queue" | "connecting";
 
@@ -153,12 +153,46 @@ function SignalField({
   );
 }
 
+// Cached for the renderer lifetime. Old/blocklisted GPUs (e.g. Intel G41 on
+// WDDM 1.1) can pass a bare context probe and then fail every three.js context
+// creation, which react-three-fiber retries thousands of times per second.
+let webGlUsable: boolean | null = null;
+
 function supportsWebGl(): boolean {
+  if (webGlUsable !== null) {
+    return webGlUsable;
+  }
   try {
     const canvas = document.createElement("canvas");
-    return Boolean(canvas.getContext("webgl2") || canvas.getContext("webgl"));
+    const attributes: WebGLContextAttributes = { failIfMajorPerformanceCaveat: true };
+    const gl = canvas.getContext("webgl2", attributes) ?? canvas.getContext("webgl", attributes);
+    webGlUsable = gl !== null && !gl.isContextLost();
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
   } catch {
-    return false;
+    webGlUsable = false;
+  }
+  return webGlUsable;
+}
+
+function disableWebGl(): void {
+  webGlUsable = false;
+}
+
+class WebGlFailureBoundary extends Component<{ children: ReactNode; onFailure: () => void }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: unknown): void {
+    console.warn("[ShaderAtmosphere] WebGL backdrop disabled after renderer failure:", error);
+    disableWebGl();
+    this.props.onFailure();
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? null : this.props.children;
   }
 }
 
@@ -230,14 +264,30 @@ export function ShaderAtmosphere({
       aria-hidden="true"
     >
       {!reducedMotion && webGlSupported && (
-        <Canvas
-          dpr={[0.75, 1]}
-          frameloop={renderActive ? "always" : "never"}
-          camera={{ position: [0, 0, 1] }}
-          gl={{ antialias: false, alpha: false, powerPreference: "high-performance" }}
-        >
-          <SignalField variant={variant} pointerRef={pointerRef} />
-        </Canvas>
+        <WebGlFailureBoundary onFailure={() => setWebGlSupported(false)}>
+          <Canvas
+            dpr={[0.75, 1]}
+            frameloop={renderActive ? "always" : "never"}
+            camera={{ position: [0, 0, 1] }}
+            gl={(defaults) => {
+              try {
+                return new WebGLRenderer({
+                  ...defaults,
+                  antialias: false,
+                  alpha: false,
+                  powerPreference: "high-performance",
+                });
+              } catch (error) {
+                // Unmount the canvas so react-three-fiber stops retrying.
+                disableWebGl();
+                setWebGlSupported(false);
+                throw error;
+              }
+            }}
+          >
+            <SignalField variant={variant} pointerRef={pointerRef} />
+          </Canvas>
+        </WebGlFailureBoundary>
       )}
     </div>
   );

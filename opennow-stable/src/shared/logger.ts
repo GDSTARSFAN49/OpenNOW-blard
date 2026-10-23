@@ -9,6 +9,8 @@ export interface LogEntry {
   prefix: string;
   message: string;
   args: unknown[];
+  /** Consecutive identical entries folded into this one (absent = 1). */
+  repeatCount?: number;
 }
 
 interface ConsoleOutputStream {
@@ -102,7 +104,20 @@ export function formatLogEntry(entry: LogEntry): string {
       }).join(" ")
     : "";
 
-  return `${timeStr} ${levelStr} ${prefixStr}${entry.message}${argsStr}`;
+  const repeatStr = entry.repeatCount && entry.repeatCount > 1
+    ? ` (repeated ${entry.repeatCount} times)`
+    : "";
+
+  return `${timeStr} ${levelStr} ${prefixStr}${entry.message}${argsStr}${repeatStr}`;
+}
+
+function isRepeatOf(previous: LogEntry | undefined, entry: LogEntry): boolean {
+  return previous !== undefined
+    && previous.level === entry.level
+    && previous.prefix === entry.prefix
+    && previous.message === entry.message
+    && previous.args.length === entry.args.length
+    && previous.args.every((arg, index) => arg === entry.args[index]);
 }
 
 /**
@@ -199,6 +214,14 @@ export class LogCapture {
       message,
       args,
     };
+
+    // Fold error storms (e.g. a retry loop) into one entry so they cannot
+    // evict the rest of the history from the bounded buffer.
+    const previous = this.entries[this.entries.length - 1];
+    if (isRepeatOf(previous, entry)) {
+      previous.repeatCount = (previous.repeatCount ?? 1) + 1;
+      return;
+    }
 
     this.entries.push(entry);
 

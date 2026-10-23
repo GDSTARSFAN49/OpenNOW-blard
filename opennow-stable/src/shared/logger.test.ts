@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-import { LogCapture } from "./logger";
+import { formatLogEntry, LogCapture } from "./logger";
 
 type ConsoleOutputStreams = NonNullable<ConstructorParameters<typeof LogCapture>[1]>;
 
@@ -115,4 +115,20 @@ test("leaves unrelated asynchronous stream errors to existing reporters", async 
     capture.restoreConsole();
     console.warn = originalWarn;
   }
+});
+
+test("folds consecutive identical entries into a repeat count", () => {
+  const capture = new LogCapture("test", {});
+  capture.addEntry("error", "renderer", "WebGL context could not be created", ["src:1"]);
+  capture.addEntry("error", "renderer", "WebGL context could not be created", ["src:1"]);
+  capture.addEntry("error", "renderer", "WebGL context could not be created", ["src:1"]);
+  capture.addEntry("log", "NativeStreamer", "Starting", []);
+  capture.addEntry("error", "renderer", "WebGL context could not be created", ["src:1"]);
+
+  const entries = capture.getEntries();
+  assert.equal(entries.length, 3);
+  assert.equal(entries[0].repeatCount, 3);
+  assert.match(formatLogEntry(entries[0]), /\(repeated 3 times\)$/);
+  assert.equal(entries[1].repeatCount, undefined);
+  assert.doesNotMatch(formatLogEntry(entries[2]), /repeated/);
 });
