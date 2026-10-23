@@ -8,6 +8,14 @@ pub(crate) const NATIVE_VIDEO_BACKEND_ENV: &str = "OPENNOW_NATIVE_VIDEO_BACKEND"
 pub(crate) const NATIVE_ZERO_COPY_ENV: &str = "OPENNOW_NATIVE_ZERO_COPY";
 pub(crate) const NATIVE_PRESENT_MAX_FPS_ENV: &str = "OPENNOW_NATIVE_PRESENT_MAX_FPS";
 pub(crate) const NATIVE_D3D_FULLSCREEN_ENV: &str = "OPENNOW_NATIVE_D3D_FULLSCREEN";
+pub(crate) const NATIVE_AUDIO_LATENCY_ENV: &str = "OPENNOW_NATIVE_AUDIO_LATENCY_MS";
+pub(crate) const NATIVE_AUDIO_SYNC_ENV: &str = "OPENNOW_NATIVE_AUDIO_SYNC";
+/// Audio jitter-buffer budget. Video keeps the 2 ms webrtcbin default; audio
+/// needs enough slack to absorb network jitter and scheduler stalls on slow
+/// CPUs, otherwise late Opus packets are dropped and playback crackles.
+pub(crate) const DEFAULT_AUDIO_LATENCY_MS: u32 = 60;
+const MIN_AUDIO_LATENCY_MS: u32 = 10;
+const MAX_AUDIO_LATENCY_MS: u32 = 500;
 pub(crate) const PRESENT_LIMITER_AUTO_SENTINEL: u32 = u32::MAX;
 pub(crate) const PRESENT_LIMITER_VRR_SENTINEL: u32 = u32::MAX - 1;
 const VRR_REFRESH_HEADROOM_FPS: u32 = 3;
@@ -113,6 +121,33 @@ pub(crate) fn resolve_d3d_fullscreen_sink_for(
     cloud_gsync_enabled
 }
 
+pub(crate) fn audio_latency_ms() -> u32 {
+    resolve_audio_latency_ms(std::env::var(NATIVE_AUDIO_LATENCY_ENV).ok())
+}
+
+pub(crate) fn resolve_audio_latency_ms(env_override: Option<String>) -> u32 {
+    env_override
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|value| value.clamp(MIN_AUDIO_LATENCY_MS, MAX_AUDIO_LATENCY_MS))
+        .unwrap_or(DEFAULT_AUDIO_LATENCY_MS)
+}
+
+/// Clock-synced audio playout (default) lets the audio sink pace output from
+/// the jitter buffer and correct sender/soundcard clock drift. `0` restores
+/// the legacy unsynchronized playout.
+pub(crate) fn audio_clock_sync_enabled() -> bool {
+    resolve_audio_clock_sync(std::env::var(NATIVE_AUDIO_SYNC_ENV).ok())
+}
+
+pub(crate) fn resolve_audio_clock_sync(env_override: Option<String>) -> bool {
+    !env_override.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +206,22 @@ mod tests {
             true,
             Some("0".to_owned())
         ));
+    }
+
+    #[test]
+    fn audio_latency_defaults_and_clamps_env_override() {
+        assert_eq!(resolve_audio_latency_ms(None), DEFAULT_AUDIO_LATENCY_MS);
+        assert_eq!(resolve_audio_latency_ms(Some("abc".to_owned())), DEFAULT_AUDIO_LATENCY_MS);
+        assert_eq!(resolve_audio_latency_ms(Some(" 80 ".to_owned())), 80);
+        assert_eq!(resolve_audio_latency_ms(Some("1".to_owned())), MIN_AUDIO_LATENCY_MS);
+        assert_eq!(resolve_audio_latency_ms(Some("9000".to_owned())), MAX_AUDIO_LATENCY_MS);
+    }
+
+    #[test]
+    fn audio_clock_sync_is_on_unless_disabled() {
+        assert!(resolve_audio_clock_sync(None));
+        assert!(resolve_audio_clock_sync(Some("1".to_owned())));
+        assert!(!resolve_audio_clock_sync(Some("0".to_owned())));
+        assert!(!resolve_audio_clock_sync(Some("Off".to_owned())));
     }
 }

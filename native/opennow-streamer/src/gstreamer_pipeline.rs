@@ -1,3 +1,8 @@
+use crate::gstreamer_audio::{
+    audio_sink_chain_factories, configure_audio_decoder, configure_audio_jitterbuffer,
+    configure_audio_queue, configure_audio_sink, configure_error_ignore, handle_latency_message,
+    is_rtp_audio_pad, watch_audio_playout,
+};
 use crate::gstreamer_backend::send_log;
 use crate::gstreamer_config::{
     automatic_present_max_fps, requested_video_backend, use_external_renderer_window,
@@ -1474,6 +1479,7 @@ fn start_gstreamer_bus_diagnostics(
         return;
     };
 
+    let pipeline = pipeline.downgrade();
     thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
             let Some(message) = bus.timed_pop_filtered(
@@ -1520,14 +1526,19 @@ fn start_gstreamer_bus_diagnostics(
                         message_structure_summary(&message)
                     ),
                 ),
-                gst::MessageView::Latency(_) => send_log(
-                    &event_sender,
-                    "debug",
-                    format!(
-                        "GStreamer bus latency update from {}.",
-                        message_src_name(&message)
-                    ),
-                ),
+                gst::MessageView::Latency(_) => {
+                    send_log(
+                        &event_sender,
+                        "debug",
+                        format!(
+                            "GStreamer bus latency update from {}.",
+                            message_src_name(&message)
+                        ),
+                    );
+                    if let Some(pipeline) = pipeline.upgrade() {
+                        handle_latency_message(&pipeline, &message, &event_sender);
+                    }
+                }
                 gst::MessageView::StateChanged(state) => {
                     if message
                         .src()
@@ -1655,6 +1666,10 @@ fn wire_incoming_media_sink(
                 return;
             }
         };
+        if is_rtp_audio_pad(src_pad) {
+            configure_audio_jitterbuffer(src_pad, &event_sender);
+            configure_audio_decoder(&decodebin);
+        }
 
         let decode_pipeline = pipeline.downgrade();
         let decode_sender = event_sender.clone();
@@ -2866,12 +2881,7 @@ fn link_decoded_media_pad(
         DecodedMediaKind::Audio => link_media_chain(
             pipeline,
             src_pad,
-            &[
-                ("queue", None),
-                ("audioconvert", None),
-                ("audioresample", None),
-                ("autoaudiosink", Some(false)),
-            ],
+            &audio_sink_chain_factories(),
             "audio",
             None,
             event_sender,
@@ -2930,7 +2940,14 @@ fn link_media_chain(
         let factory = *factory;
         let element = make_element(factory)?;
         if factory == "queue" {
-            configure_queue_for_low_latency(&element, media_label);
+            if media_label == "audio" {
+                configure_audio_queue(&element, event_sender);
+            } else {
+                configure_queue_for_low_latency(&element, media_label);
+            }
+        }
+        if factory == "errorignore" {
+            configure_error_ignore(&element);
         }
         if factory == "dwritetextoverlay" {
             configure_stats_overlay_element(&element);
@@ -2941,7 +2958,9 @@ fn link_media_chain(
             }
         }
         if sync_property.is_some() || factory.ends_with("sink") {
-            if factory == "d3d11videosink" || factory == "d3d12videosink" {
+            if media_label == "audio" {
+                configure_audio_sink(&element);
+            } else if factory == "d3d11videosink" || factory == "d3d12videosink" {
                 // Fallback decodebin path: never exclusive-fullscreen (Internal default).
                 configure_d3d_video_sink(&element, false);
             } else {
@@ -2990,6 +3009,7 @@ fn link_media_chain(
         }
         watch_first_sink_buffer(sink, media_label, event_sender, streaming_reported);
         if media_label == "audio" {
+            watch_audio_playout(sink);
             if let Some(video_liveness) = video_liveness {
                 watch_audio_activity(sink, video_liveness);
             }

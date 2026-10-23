@@ -12,6 +12,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { cpus } from "node:os";
 
 // Keyboard shortcuts reference (matching Rust implementation):
 // Screenshot keybind - configurable, handled in renderer
@@ -73,6 +74,7 @@ import {
 import {
   buildChromiumCommandLine,
   normalizeBootstrapChromiumPreferences,
+  shouldForceReducedMotion,
   type BootstrapChromiumPreferences,
 } from "./chromiumCommandLine";
 import { parseDirectLaunchArgs, type DirectLaunchArgs } from "@shared/directLaunch";
@@ -136,6 +138,11 @@ for (const [name, value] of Object.entries(chromiumCommandLine.switches)) {
   } else {
     app.commandLine.appendSwitch(name, value);
   }
+}
+
+if (shouldForceReducedMotion(cpus().length, process.env.OPENNOW_REDUCED_MOTION)) {
+  console.log("[Main] Low-end CPU detected; forcing reduced motion to save CPU.");
+  app.commandLine.appendSwitch("force-prefers-reduced-motion");
 }
 
 // --- Responsiveness flags ---

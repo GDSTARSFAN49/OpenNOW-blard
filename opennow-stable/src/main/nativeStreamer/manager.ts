@@ -36,6 +36,7 @@ import {
   createNativeStreamerStatus,
   formatError,
 } from "./capabilities";
+import { describeNativeExitCode } from "./exitCode";
 import { resolveNativeStreamerExecutableCandidates } from "./executableDiscovery";
 import {
   isNativeStreamerEvent,
@@ -80,6 +81,9 @@ const STOP_TIMEOUT_MS = 1200;
 const MAX_INPUT_STDIN_BUFFER_BYTES = 64 * 1024;
 const MIN_NATIVE_BITRATE_KBPS = 5_000;
 const MAX_NATIVE_BITRATE_KBPS = 150_000;
+// Streamer error codes after which the native pipeline cannot heal itself;
+// end the session so the renderer's session recovery reconnects.
+const UNRECOVERABLE_NATIVE_ERROR_CODES = new Set(["native-video-stall-fatal"]);
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -528,7 +532,7 @@ export class NativeStreamerManager {
     });
 
     child.once("exit", (code, signal) => {
-      const reason = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
+      const reason = signal ? `signal ${signal}` : describeNativeExitCode(code);
       this.handleProcessExit(child, reason);
     });
 
@@ -677,7 +681,11 @@ export class NativeStreamerManager {
       } else {
         console.log(text);
       }
-      this.options.emit({ type: "log", message: text });
+      // Per-second debug telemetry stays in the main-process log; forwarding it
+      // to the renderer only costs IPC and CPU while streaming.
+      if (message.level !== "debug") {
+        this.options.emit({ type: "log", message: text });
+      }
       return;
     }
 
@@ -784,6 +792,26 @@ export class NativeStreamerManager {
 
     if (message.type === "error") {
       this.options.emit({ type: "error", message: `Native streamer error: ${message.message}` });
+      if (message.code && UNRECOVERABLE_NATIVE_ERROR_CODES.has(message.code)) {
+        this.failActiveSession(`${message.code}: ${message.message}`);
+      }
+    }
+  }
+
+  private failActiveSession(reason: string): void {
+    const child = this.child;
+    if (!child || this.activeSessionId === null) {
+      return;
+    }
+
+    console.warn(`[NativeStreamer] Ending native session for recovery: ${reason}`);
+    this.handleProcessExit(child, reason);
+    if (!child.killed) {
+      try {
+        child.kill();
+      } catch (error) {
+        console.warn("[NativeStreamer] Failed to terminate process after unrecoverable error:", error);
+      }
     }
   }
 

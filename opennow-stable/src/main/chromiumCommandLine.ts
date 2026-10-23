@@ -36,6 +36,28 @@ export function normalizeBootstrapChromiumPreferences(raw: unknown): BootstrapCh
   };
 }
 
+/** Hosts with this many logical CPUs or fewer start with reduced motion. */
+export const LOW_END_LOGICAL_CPU_THRESHOLD = 2;
+
+/**
+ * Reduced motion turns off the full-screen WebGL backdrop and UI motion that
+ * otherwise keep a dual-core CPU busy while the app sits idle.
+ * `OPENNOW_REDUCED_MOTION=1|0` forces it on or off.
+ */
+export function shouldForceReducedMotion(
+  logicalCpuCount: number,
+  envOverride: string | undefined,
+): boolean {
+  const override = envOverride?.trim().toLowerCase();
+  if (override === "1" || override === "true") {
+    return true;
+  }
+  if (override === "0" || override === "false") {
+    return false;
+  }
+  return logicalCpuCount > 0 && logicalCpuCount <= LOW_END_LOGICAL_CPU_THRESHOLD;
+}
+
 export function buildChromiumCommandLine(
   preferences: BootstrapChromiumPreferences,
   platform: NodeJS.Platform,

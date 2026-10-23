@@ -2,6 +2,8 @@
 
 mod backend;
 #[cfg(feature = "gstreamer")]
+mod gstreamer_audio;
+#[cfg(feature = "gstreamer")]
 mod gstreamer_backend;
 // Present/input policy helpers are pure Rust and stay available for unit tests
 // even when the optional GStreamer feature is off.

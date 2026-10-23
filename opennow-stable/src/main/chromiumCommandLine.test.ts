@@ -5,6 +5,7 @@ import {
   buildChromiumCommandLine,
   MAC_STEAM_CONTROLLER_COMPATIBILITY_DISABLED_FEATURE,
   normalizeBootstrapChromiumPreferences,
+  shouldForceReducedMotion,
 } from "./chromiumCommandLine";
 
 test("normalizes bootstrap Chromium preferences", () => {
@@ -60,4 +61,13 @@ test("adds Steam Controller compatibility feature disable only on macOS when ena
     ).disableFeatures.includes(MAC_STEAM_CONTROLLER_COMPATIBILITY_DISABLED_FEATURE),
     false,
   );
+});
+
+test("forces reduced motion on dual-core hosts unless overridden", () => {
+  assert.equal(shouldForceReducedMotion(2, undefined), true);
+  assert.equal(shouldForceReducedMotion(1, undefined), true);
+  assert.equal(shouldForceReducedMotion(4, undefined), false);
+  assert.equal(shouldForceReducedMotion(0, undefined), false);
+  assert.equal(shouldForceReducedMotion(8, "1"), true);
+  assert.equal(shouldForceReducedMotion(2, "0"), false);
 });
