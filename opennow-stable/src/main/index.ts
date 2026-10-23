@@ -560,9 +560,11 @@ app.whenReady().then(async () => {
     onStateChanged: emitUpdaterStateToRenderer,
     automaticChecksEnabled: settingsManager.get("autoCheckForUpdates"),
     updateChannel: settingsManager.get("updateChannel"),
+    // Patched fork build: upstream releases would replace the native streamer
+    // fixes, so self-updates stay off for every instance.
     disabledReason: appInstanceProfile.isSecondary
       ? "Updates are managed by the primary OpenNOW instance."
-      : undefined,
+      : "Updates are disabled in this patched build (OpenNOW-blard).",
     onBeforeQuitAndInstall: () => {
       isUpdaterInstallQuitInProgress = true;
       clearExplicitShutdownFallback();

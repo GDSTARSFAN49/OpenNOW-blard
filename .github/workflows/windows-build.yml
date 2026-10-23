@@ -1,0 +1,162 @@
+name: windows-build
+
+# Fork build: Windows x64 installer + portable with the native streamer and the
+# bundled GStreamer runtime, on GitHub-hosted runners. Steps mirror the
+# windows-x64 job in release.yml.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: windows-x64
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    defaults:
+      run:
+        working-directory: opennow-stable
+
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
+      npm_config_audit: "false"
+      npm_config_fund: "false"
+      GSTREAMER_WINDOWS_VERSION: "1.28.3"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_MULTIPLEXING: "false"
+      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: opennow-stable/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust native build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/opennow-streamer/target
+          key: ${{ runner.os }}-windows-x64-cargo-${{ hashFiles('native/opennow-streamer/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-x64-cargo-
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/.cache/electron
+            ${{ github.workspace }}/.cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Cache Windows GStreamer SDK
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\gstreamer
+            ${{ github.workspace }}\.cache\gstreamer-windows
+          key: gstreamer-windows-${{ env.GSTREAMER_WINDOWS_VERSION }}
+
+      - name: Install Windows GStreamer SDK
+        shell: pwsh
+        run: |
+          $installRoot = "C:\gstreamer\1.0\msvc_x86_64"
+          function Test-GStreamerRoot([string] $candidate) {
+            return [bool]($candidate -and
+              (Test-Path (Join-Path $candidate "lib\pkgconfig\gstreamer-1.0.pc")) -and
+              ((Test-Path (Join-Path $candidate "bin\pkg-config.exe")) -or (Test-Path (Join-Path $candidate "bin\pkgconf.exe"))))
+          }
+          if (-not (Test-GStreamerRoot $installRoot)) {
+            $version = $env:GSTREAMER_WINDOWS_VERSION
+            $fileName = "gstreamer-1.0-msvc-x86_64-$version.exe"
+            $downloadDir = Join-Path $env:GITHUB_WORKSPACE ".cache\gstreamer-windows\$version"
+            New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
+            $installer = Join-Path $downloadDir $fileName
+            if (-not ((Test-Path $installer) -and ((Get-Item $installer).Length -gt 0))) {
+              $ok = $false
+              foreach ($base in @(
+                "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc",
+                "https://gstreamer.freedesktop.org/pkg/windows/$version/msvc"
+              )) {
+                curl.exe --fail --location --retry 8 --retry-all-errors --retry-delay 5 --connect-timeout 30 --output $installer "$base/$fileName"
+                if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              }
+              if (-not $ok) { Write-Error "Failed to download $fileName"; exit 1 }
+            }
+            $install = Start-Process -FilePath $installer -ArgumentList @(
+              "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/TYPE=devel", "/DIR=$installRoot"
+            ) -Wait -PassThru -NoNewWindow
+            if ($install.ExitCode -ne 0) { Write-Error "GStreamer installer exit code $($install.ExitCode)"; exit 1 }
+          }
+          if (-not (Test-GStreamerRoot $installRoot)) {
+            Write-Error "GStreamer SDK root not found at $installRoot"
+            exit 1
+          }
+          Write-Host "Using GStreamer Windows SDK: $installRoot"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$installRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$installRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Build patched Windows GStreamer D3D11 plugin
+        shell: pwsh
+        run: ./scripts/build-patched-gstreamer-d3d11.ps1 -GStreamerRoot "$env:GSTREAMER_1_0_ROOT_MSVC_X86_64" -Version "$env:GSTREAMER_WINDOWS_VERSION"
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --progress=false
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test native streamer
+        env:
+          OPENNOW_NATIVE_STREAMER_FEATURES: gstreamer
+        run: cargo test --manifest-path ../native/opennow-streamer/Cargo.toml --features gstreamer
+
+      - name: Build native streamer
+        env:
+          OPENNOW_NATIVE_STREAMER_FEATURES: gstreamer
+          OPENNOW_BUNDLE_GSTREAMER_RUNTIME: "1"
+          OPENNOW_NATIVE_STREAMER_PLATFORM_KEY: win32-x64
+        run: npm run native:build
+
+      - name: Build app bundles
+        run: npm run build
+
+      - name: Package installers
+        run: npx electron-builder --publish never --win nsis portable --x64
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenNOW-blard-windows-x64
+          path: |
+            opennow-stable/dist-release/*-x64.exe
+          if-no-files-found: error
+          retention-days: 30
